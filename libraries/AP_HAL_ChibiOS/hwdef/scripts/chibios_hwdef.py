@@ -1106,7 +1106,7 @@ class ChibiOSHWDef(object):
             f.write('#define APP_START_OFFSET_KB %u\n' % self.get_config('APP_START_OFFSET_KB', default=0, type=int))
         f.write('\n')
 
-        ram_reserve_start,ram0_start_address = self.get_ram_reserve_start()
+        ram_reserve_start, ram0_start_address = self.get_ram_reserve_start()
         f.write('#define HAL_RAM0_START 0x%08x\n' % ram0_start_address)
         if ram_reserve_start > 0:
             f.write('#define HAL_RAM_RESERVE_START 0x%08x\n' % ram_reserve_start)
@@ -1207,25 +1207,7 @@ class ChibiOSHWDef(object):
 
         # setup for bootloader build
         if self.is_bootloader_fw():
-            if self.get_config('FULL_CHIBIOS_BOOTLOADER', required=False, default=False):
-                # we got enough space to fit everything so we enable almost everything
-                f.write('''
-#define HAL_BOOTLOADER_BUILD TRUE
-#define HAL_USE_ADC FALSE
-#define HAL_USE_EXT FALSE
-#define HAL_USE_I2C FALSE
-#define HAL_USE_PWM FALSE
-#define HAL_NO_UARTDRIVER
-#ifndef CH_CFG_USE_DYNAMIC
-#define CH_CFG_USE_DYNAMIC FALSE
-#endif
-#define HAL_USE_EMPTY_STORAGE 1
-#ifndef HAL_STORAGE_SIZE
-#define HAL_STORAGE_SIZE 16384
-#endif
-''')
-            else:
-                f.write('''
+            f.write('''
 #define HAL_BOOTLOADER_BUILD TRUE
 #define HAL_USE_ADC FALSE
 #define HAL_USE_EXT FALSE
@@ -1238,7 +1220,9 @@ class ChibiOSHWDef(object):
 // avoid timer and RCIN threads to save memory
 #define HAL_NO_TIMER_THREAD
 #define HAL_NO_RCOUT_THREAD
-#define HAL_NO_RCIN_THREAD
+#ifndef HAL_RCIN_THREAD_ENABLED
+#define HAL_RCIN_THREAD_ENABLED 0
+#endif
 #ifndef AP_HAL_SHARED_DMA_ENABLED
 #define AP_HAL_SHARED_DMA_ENABLED 0
 #endif
@@ -1385,7 +1369,7 @@ class ChibiOSHWDef(object):
         if ext_flash_size > 32:
             self.error("We only support 24bit addressing over external flash")
 
-        ram_reserve_start,ram0_start_address = self.get_ram_reserve_start()
+        ram_reserve_start, ram0_start_address = self.get_ram_reserve_start()
         if ram_reserve_start > 0 and ram0_start_address == ram0_start:
             ram0_start += ram_reserve_start
             ram0_len -= ram_reserve_start
@@ -1856,7 +1840,7 @@ INCLUDE common.ld
             if 'io_firmware.bin' not in self.romfs:
                 self.error("Need io_firmware.bin in ROMFS for IOMCU")
 
-            f.write('#define HAL_WITH_IO_MCU 1\n')
+            self.write_defaulting_define(f, 'HAL_WITH_IO_MCU', 1)
             f.write('#define HAL_UART_IOMCU_IDX %u\n' % len(serial_list))
             f.write(
                 '#define HAL_UART_IO_DRIVER ChibiOS::UARTDriver uart_io(HAL_UART_IOMCU_IDX)\n'
@@ -2413,6 +2397,10 @@ INCLUDE common.ld
         this_dir = os.path.realpath(__file__)
         rootdir = os.path.relpath(os.path.join(this_dir, "../../../../.."))
         hwdef_dirname = os.path.basename(os.path.dirname(args.hwdef[0]))
+        # allow re-using of bootloader from different build:
+        use_bootloader_from_board = self.get_config('USE_BOOTLOADER_FROM_BOARD', default=None, required=False)
+        if use_bootloader_from_board is not None:
+            hwdef_dirname = use_bootloader_from_board
         bootloader_filename = "%s_bl.bin" % (hwdef_dirname,)
         bootloader_path = os.path.join(rootdir,
                                        "Tools",
@@ -2521,6 +2509,11 @@ Please run: Tools/scripts/build_bootloaders.py %s
         if not self.is_periph_fw():
             self.romfs["hwdef.dat"] = hwdat
 
+    def write_defaulting_define(self, f, name, value):
+        f.write(f"#ifndef {name}\n")
+        f.write(f"#define {name} {value}\n")
+        f.write("#endif\n")
+
     def write_define(self, f, name, value):
         f.write(f"#define {name} {value}\n")
 
@@ -2621,6 +2614,11 @@ Please run: Tools/scripts/build_bootloaders.py %s
         self.embed_bootloader(f)
 
         if len(self.romfs) > 0:
+            # Allow lua to load from ROMFS if any lua files are added
+            for file in self.romfs.keys():
+                if file.startswith("scripts") and file.endswith(".lua"):
+                    f.write('#define HAL_HAVE_AP_ROMFS_EMBEDDED_LUA 1\n')
+                    break
             f.write('#define HAL_HAVE_AP_ROMFS_EMBEDDED_H 1\n')
 
         if self.mcu_series.startswith('STM32F1'):
@@ -2921,7 +2919,7 @@ Please run: Tools/scripts/build_bootloaders.py %s
             return False
         return True
 
-    def process_line(self, line):
+    def process_line(self, line, depth):
         '''process one line of pin definition file'''
         self.all_lines.append(line)
         a = shlex.split(line, posix=False)
@@ -3045,6 +3043,8 @@ Please run: Tools/scripts/build_bootloaders.py %s
                     self.baro_list = []
                 if u == 'AIRSPEED':
                     self.airspeed_list = []
+                if u == 'ROMFS':
+                    self.romfs = {}
         elif a[0] == 'env':
             self.progress("Adding environment %s" % ' '.join(a[1:]))
             if len(a[1:]) < 2:
@@ -3056,16 +3056,23 @@ Please run: Tools/scripts/build_bootloaders.py %s
             self.env_vars[name] = value
         elif a[0] == 'define':
             # extract numerical defines for processing by other parts of the script
-            result = re.match(r'define\s*([A-Z_]+)\s*([0-9]+)', line)
+            result = re.match(r'define\s*([A-Z_0-9]+)\s+([0-9]+)', line)
             if result:
-                self.intdefines[result.group(1)] = int(result.group(2))
+                (name, intvalue) = (result.group(1), int(result.group(2)))
+                if name in self.intdefines and self.intdefines[name] == intvalue:
+                    msg = f"{name} already in defines with same value"
+                    if depth == 0:
+                        print(msg)
+                        # raise ValueError(msg)
+
+                self.intdefines[name] = intvalue
 
     def progress(self, message):
         if self.quiet:
             return
         print(message)
 
-    def process_file(self, filename):
+    def process_file(self, filename, depth=0):
         '''process a hwdef.dat file'''
         try:
             f = open(filename, "r")
@@ -3084,9 +3091,9 @@ Please run: Tools/scripts/build_bootloaders.py %s
                     include_file = os.path.normpath(
                         os.path.join(dir, include_file))
                 self.progress("Including %s" % include_file)
-                self.process_file(include_file)
+                self.process_file(include_file, depth+1)
             else:
-                self.process_line(line)
+                self.process_line(line, depth)
 
     def add_apperiph_defaults(self, f):
         '''add default defines for peripherals'''
@@ -3200,14 +3207,15 @@ Please run: Tools/scripts/build_bootloaders.py %s
         # write out hw.dat for ROMFS
         self.write_all_lines(os.path.join(self.outdir, "hw.dat"))
 
+        # Add ROMFS directories
+        self.romfs_add_dir(['scripts'])
+        self.romfs_add_dir(['param'])
+
         # write out hwdef.h
         self.write_hwdef_header(os.path.join(self.outdir, "hwdef.h"))
 
         # write out ldscript.ld
         self.write_ldscript(os.path.join(self.outdir, "ldscript.ld"))
-
-        self.romfs_add_dir(['scripts'])
-        self.romfs_add_dir(['param'])
 
         self.write_ROMFS(self.outdir)
 

@@ -24,7 +24,7 @@ const AP_Param::GroupInfo AC_AttitudeControl::var_info[] = {
 
     // @Param: SLEW_YAW
     // @DisplayName: Yaw target slew rate
-    // @Description: Maximum rate the yaw target can be updated in Loiter, RTL, Auto flight modes
+    // @Description: Maximum rate the yaw target can be updated in RTL and Auto flight modes
     // @Units: cdeg/s
     // @Range: 500 18000
     // @Increment: 100
@@ -934,11 +934,11 @@ void AC_AttitudeControl::reset_target_and_rate(bool reset_rate)
 {
     // move attitude target to current attitude
     _ahrs.get_quat_body_to_ned(_attitude_target);
+    _attitude_target.to_euler(_euler_angle_target);
 
     if (reset_rate) {
-        // Convert euler angle derivative of desired attitude into a body-frame angular velocity vector for feedforward
         _ang_vel_target.zero();
-        _euler_angle_target.zero();
+        _euler_rate_target.zero();
     }
 }
 

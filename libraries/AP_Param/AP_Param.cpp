@@ -969,7 +969,6 @@ AP_Param::find_by_index(uint16_t idx, enum ap_var_type *ptype, ParamToken *token
 AP_Param* AP_Param::find_by_name(const char* name, enum ap_var_type *ptype, ParamToken *token)
 {
     AP_Param *ap;
-    uint16_t count = 0;
     for (ap = AP_Param::first(token, ptype);
          ap && *ptype != AP_PARAM_GROUP && *ptype != AP_PARAM_NONE;
          ap = AP_Param::next_scalar(token, ptype)) {
@@ -981,7 +980,6 @@ AP_Param* AP_Param::find_by_name(const char* name, enum ap_var_type *ptype, Para
                 break;
             }
         }
-        count++;
     }
     return ap;
 }
@@ -2033,7 +2031,7 @@ void AP_Param::convert_old_parameters_scaled(const struct ConversionInfo *conver
 // is_top_level: Is true if the class had its own top level key, param_key. It is false if the class was a subgroup
 void AP_Param::convert_class(uint16_t param_key, void *object_pointer,
                                     const struct AP_Param::GroupInfo *group_info,
-                                    uint16_t old_index, uint16_t old_top_element, bool is_top_level)
+                                    uint16_t old_index, bool is_top_level)
 {
     const uint8_t group_shift = is_top_level ? 0 : 6;
 
@@ -2074,11 +2072,34 @@ void AP_Param::convert_class(uint16_t param_key, void *object_pointer,
     flush();
 }
 
+// convert an object which was stored in a vehicle's G2 into a new
+// object in AP_Vehicle.cpp:
+void AP_Param::convert_g2_objects(const void *g2, const G2ObjectConversion g2_conversions[], uint8_t num_conversions)
+{
+    // Find G2's Top Level Key
+    ConversionInfo info;
+    if (!find_top_level_key_by_pointer(g2, info.old_key)) {
+        return;
+    }
+    for (uint8_t i=0; i<num_conversions; i++) {
+        const auto &c { g2_conversions[i] };
+        convert_class(info.old_key, c.object_pointer, c.var_info, c.old_index, false);
+    }
+}
+
+void AP_Param::convert_toplevel_objects(const TopLevelObjectConversion conversions[], uint8_t num_conversions)
+{
+    for (uint8_t i=0; i<num_conversions; i++) {
+        const auto &c { conversions[i] };
+        convert_class(c.old_index, c.object_pointer, c.var_info, 0, true);
+    }
+}
+
 /*
  convert width of a parameter, allowing update to wider scalar values
  without changing the parameter indexes
 */
-bool AP_Param::convert_parameter_width(ap_var_type old_ptype, float scale_factor)
+bool AP_Param::_convert_parameter_width(ap_var_type old_ptype, float scale_factor, bool bitmask)
 {
     if (configured_in_storage()) {
         // already converted or set by the user
@@ -2122,10 +2143,46 @@ bool AP_Param::convert_parameter_width(ap_var_type old_ptype, float scale_factor
     
     AP_Param *old_ap = (AP_Param *)&old_value[0];
 
-    // going via float is safe as the only time we would be converting
-    // from AP_Int32 is when converting to float
-    float old_float_value = old_ap->cast_to_float(old_ptype);
-    set_value(new_ptype, this, old_float_value*scale_factor);
+    if (!bitmask) {
+        // Numeric conversion
+        // going via float is safe as the only time we would be converting
+        // from AP_Int32 is when converting to float
+        float old_float_value = old_ap->cast_to_float(old_ptype);
+        set_value(new_ptype, this, old_float_value*scale_factor);
+
+    } else {
+        // Bitmask conversion, go via uint32
+        // int8 -1 should convert to int16 255
+        uint32_t mask;
+        switch (old_ptype) {
+        case AP_PARAM_INT8:
+            mask = (uint8_t)(*(AP_Int8*)old_ap);
+            break;
+        case AP_PARAM_INT16:
+            mask = (uint16_t)(*(AP_Int16*)old_ap);
+            break;
+        case AP_PARAM_INT32:
+            mask = (uint32_t)(*(AP_Int32*)old_ap);
+            break;
+        default:
+            return false;
+        }
+
+        switch (new_ptype) {
+        case AP_PARAM_INT8:
+            ((AP_Int8 *)this)->set(mask);
+            break;
+        case AP_PARAM_INT16:
+            ((AP_Int16 *)this)->set(mask);
+            break;
+        case AP_PARAM_INT32:
+            ((AP_Int32 *)this)->set(mask);
+            break;
+        default:
+            return false;
+        }
+    }
+
 
     // force save as the new type
     save(true);
@@ -2369,8 +2426,7 @@ bool AP_Param::load_defaults_file(const char *filename, bool last_pass)
 }
 #endif // AP_PARAM_DEFAULTS_FILE_PARSING_ENABLED
 
-
-#if AP_PARAM_MAX_EMBEDDED_PARAM > 0 || (!AP_FILESYSTEM_FILE_READING_ENABLED && defined(HAL_HAVE_AP_ROMFS_EMBEDDED_H))
+#if AP_PARAM_MAX_EMBEDDED_PARAM > 0 || defined(HAL_HAVE_AP_ROMFS_EMBEDDED_H)
 /*
   count the number of parameter defaults present in supplied string
  */
@@ -2415,18 +2471,6 @@ bool AP_Param::count_param_defaults(const volatile char *ptr, int32_t length, ui
     }
     return true;
 }
-
-#if AP_PARAM_MAX_EMBEDDED_PARAM > 0
-/*
- * load a default set of parameters from a embedded parameter region
- * @last_pass: if this is the last pass on defaults - unknown parameters are
- *             ignored but if this is set a warning will be emitted
- */
-void AP_Param::load_embedded_param_defaults(bool last_pass)
-{
-    load_param_defaults(param_defaults_data.data, param_defaults_data.length, last_pass);
-}
-#endif  // AP_PARAM_MAX_EMBEDDED_PARAM > 0
 
 /*
  *  load parameter defaults from supplied string
@@ -2508,7 +2552,21 @@ void AP_Param::load_param_defaults(const volatile char *ptr, int32_t length, boo
     }
     num_param_overrides = num_defaults;
 }
-#endif // AP_PARAM_MAX_EMBEDDED_PARAM > 0
+#endif // AP_PARAM_MAX_EMBEDDED_PARAM > 0 || defined(HAL_HAVE_AP_ROMFS_EMBEDDED_H)
+
+
+#if AP_PARAM_MAX_EMBEDDED_PARAM > 0
+/*
+ * load a default set of parameters from a embedded parameter region
+ * @last_pass: if this is the last pass on defaults - unknown parameters are
+ *             ignored but if this is set a warning will be emitted
+ */
+void AP_Param::load_embedded_param_defaults(bool last_pass)
+{
+    load_param_defaults(param_defaults_data.data, param_defaults_data.length, last_pass);
+}
+#endif  // AP_PARAM_MAX_EMBEDDED_PARAM > 0
+
 
 /* 
    find a default value given a pointer to a default value in flash

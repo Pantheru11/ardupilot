@@ -172,7 +172,7 @@ void Copter::thrust_loss_check()
 
 #if AP_GRIPPER_ENABLED
         if ((copter.g2.flight_options & uint32_t(FlightOptions::RELEASE_GRIPPER_ON_THRUST_LOSS)) != 0) {
-            copter.g2.gripper.release();
+            gripper.release();
         }
 #endif
     }
@@ -269,7 +269,6 @@ void Copter::parachute_check()
     }
 
     if (parachute.release_initiated()) {
-        copter.arming.disarm(AP_Arming::Method::PARACHUTE_RELEASE);
         return;
     }
 
@@ -331,9 +330,6 @@ void Copter::parachute_check()
 // parachute_release - trigger the release of the parachute, disarm the motors and notify the user
 void Copter::parachute_release()
 {
-    // disarm motors
-    arming.disarm(AP_Arming::Method::PARACHUTE_RELEASE);
-
     // release parachute
     parachute.release();
 

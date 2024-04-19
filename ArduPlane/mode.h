@@ -136,10 +136,10 @@ public:
     virtual bool is_taking_off() const;
 
     // true if throttle min/max limits should be applied
-    bool use_throttle_limits() const;
+    virtual bool use_throttle_limits() const;
 
     // true if voltage correction should be applied to throttle
-    bool use_battery_compensation() const;
+    virtual bool use_battery_compensation() const;
 
 protected:
 
@@ -343,6 +343,7 @@ public:
     void navigate() override;
 
     bool isHeadingLinedUp(const Location loiterCenterLoc, const Location targetLoc);
+    bool isHeadingLinedUp_cd(const int32_t bearing_cd, const int32_t heading_cd);
     bool isHeadingLinedUp_cd(const int32_t bearing_cd);
 
     bool allows_throttle_nudging() const override { return true; }
@@ -397,6 +398,13 @@ public:
     void update() override;
 
     void run() override;
+
+    // true if throttle min/max limits should be applied
+    bool use_throttle_limits() const override;
+
+    // true if voltage correction should be applied to throttle
+    bool use_battery_compensation() const override { return false; }
+
 };
 
 
@@ -639,6 +647,8 @@ class ModeQLoiter : public Mode
 {
 friend class QuadPlane;
 friend class ModeQLand;
+friend class Plane;
+
 public:
 
     Number mode_number() const override { return Number::QLOITER; }
@@ -656,12 +666,12 @@ public:
 protected:
 
     bool _enter() override;
+    uint32_t last_target_loc_set_ms;
 };
 
 class ModeQLand : public Mode
 {
 public:
-
     Number mode_number() const override { return Number::QLAND; }
     const char *name() const override { return "QLAND"; }
     const char *name4() const override { return "QLND"; }
@@ -677,7 +687,6 @@ protected:
 
     bool _enter() override;
     bool _pre_arm_checks(size_t buflen, char *buffer) const override { return false; }
-
 };
 
 class ModeQRTL : public Mode

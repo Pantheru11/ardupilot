@@ -29,10 +29,6 @@ void Blimp::init_ardupilot()
     // setup telem slots with serial ports
     gcs().setup_uarts();
 
-#if HAL_LOGGING_ENABLED
-    log_init();
-#endif
-
     init_rc_in();               // sets up rc channels from radio
 
     // allocate the motors class
@@ -62,7 +58,7 @@ void Blimp::init_ardupilot()
 
     // Do GPS init
     gps.set_log_gps_bit(MASK_LOG_GPS);
-    gps.init(serial_manager);
+    gps.init();
 
     AP::compass().set_log_bit(MASK_LOG_COMPASS);
     AP::compass().init();

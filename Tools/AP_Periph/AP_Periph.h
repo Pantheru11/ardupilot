@@ -12,6 +12,7 @@
 #include <AP_BattMonitor/AP_BattMonitor.h>
 #include <AP_Airspeed/AP_Airspeed.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
+#include <AP_RangeFinder/AP_RangeFinder_Backend.h>
 #include <AP_Proximity/AP_Proximity.h>
 #include <AP_EFI/AP_EFI.h>
 #include <AP_KDECAN/AP_KDECAN.h>
@@ -119,7 +120,9 @@ void stm32_watchdog_pat();
 extern const app_descriptor_t app_descriptor;
 
 extern "C" {
-void can_printf(const char *fmt, ...) FMT_PRINTF(1,2);
+    void can_vprintf(uint8_t severity, const char *fmt, va_list arg);
+    void can_printf_severity(uint8_t severity, const char *fmt, ...) FMT_PRINTF(2,3);
+    void can_printf(const char *fmt, ...) FMT_PRINTF(1,2);
 }
 
 struct CanardInstance;
@@ -166,7 +169,9 @@ public:
     void send_relposheading_msg();
     void can_baro_update();
     void can_airspeed_update();
+#ifdef HAL_PERIPH_ENABLE_RANGEFINDER
     void can_rangefinder_update();
+#endif
     void can_battery_update();
     void can_battery_send_cells(uint8_t instance);
     void can_proximity_update();
@@ -277,7 +282,8 @@ public:
 
 #ifdef HAL_PERIPH_ENABLE_RANGEFINDER
     RangeFinder rangefinder;
-    uint32_t last_sample_ms;
+    uint32_t last_rangefinder_update_ms;
+    uint32_t last_rangefinder_sample_ms[RANGEFINDER_MAX_INSTANCES];
 #endif
 
 #ifdef HAL_PERIPH_ENABLE_PROXIMITY
@@ -449,7 +455,16 @@ public:
     bool debug_option_is_set(const DebugOptions option) const {
         return (uint8_t(g.debug.get()) & (1U<<uint8_t(option))) != 0;
     }
-    
+
+    enum class PeriphOptions {
+        PROBE_CONTINUOUS = 1U<<0,
+    };
+
+    // check if a periph option is set
+    bool option_is_set(const PeriphOptions opt) const {
+        return (uint32_t(g.options.get()) & uint32_t(opt)) != 0;
+    }
+
     // show stack as DEBUG msgs
     void show_stack_free();
 

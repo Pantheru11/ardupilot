@@ -2,18 +2,19 @@
 /// @brief   Handles the MAVLINK command mission stack.  Reads and writes mission to storage.
 
 #include "AP_Mission_config.h"
-#include <AP_Vehicle/AP_Vehicle_Type.h>
-#include <AP_Gripper/AP_Gripper_config.h>
-#include <GCS_MAVLink/GCS.h>
 
 #if AP_MISSION_ENABLED
 
-#include "AP_Mission.h"
-#include <AP_Terrain/AP_Terrain.h>
 #include <AP_AHRS/AP_AHRS.h>
-#include <AP_Camera/AP_Camera.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
+#include <AP_Camera/AP_Camera.h>
+#include <AP_Gripper/AP_Gripper_config.h>
+#include "AP_Mission.h"
+#include <AP_Scripting/AP_Scripting.h>
 #include <AP_ServoRelayEvents/AP_ServoRelayEvents_config.h>
+#include <AP_Terrain/AP_Terrain.h>
+#include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <GCS_MAVLink/GCS.h>
 #include <RC_Channel/RC_Channel_config.h>
 
 const AP_Param::GroupInfo AP_Mission::var_info[] = {
@@ -386,6 +387,7 @@ bool AP_Mission::verify_command(const Mission_Command& cmd)
     case MAV_CMD_IMAGE_STOP_CAPTURE:
     case MAV_CMD_SET_CAMERA_ZOOM:
     case MAV_CMD_SET_CAMERA_FOCUS:
+    case MAV_CMD_SET_CAMERA_SOURCE:
     case MAV_CMD_VIDEO_START_CAPTURE:
     case MAV_CMD_VIDEO_STOP_CAPTURE:
         return true;
@@ -433,6 +435,7 @@ bool AP_Mission::start_command(const Mission_Command& cmd)
     case MAV_CMD_IMAGE_STOP_CAPTURE:
     case MAV_CMD_SET_CAMERA_ZOOM:
     case MAV_CMD_SET_CAMERA_FOCUS:
+    case MAV_CMD_SET_CAMERA_SOURCE:
     case MAV_CMD_VIDEO_START_CAPTURE:
     case MAV_CMD_VIDEO_STOP_CAPTURE:
         return start_command_camera(cmd);
@@ -836,8 +839,6 @@ bool AP_Mission::read_cmd_from_storage(uint16_t index, Mission_Command& cmd) con
     return true;
 }
 
-#endif  // AP_MISSION_ENABLED
-
 bool AP_Mission::stored_in_location(uint16_t id)
 {
     switch (id) {
@@ -863,8 +864,6 @@ bool AP_Mission::stored_in_location(uint16_t id)
         return false;
     }
 }
-
-#if AP_MISSION_ENABLED
 
 /// write_cmd_to_storage - write a command to storage
 ///     index is used to calculate the storage location
@@ -938,8 +937,6 @@ void AP_Mission::write_home_to_storage()
     home_cmd.content.location = AP::ahrs().get_home();
     write_cmd_to_storage(0,home_cmd);
 }
-
-#endif  // AP_MISSION_ENABLED
 
 MAV_MISSION_RESULT AP_Mission::sanity_check_params(const mavlink_mission_item_int_t& packet)
 {
@@ -1362,6 +1359,12 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
         cmd.content.set_camera_focus.focus_value = packet.param2;
         break;
 
+    case MAV_CMD_SET_CAMERA_SOURCE:
+        cmd.content.set_camera_source.instance = packet.param1;
+        cmd.content.set_camera_source.primary_source = packet.param2;
+        cmd.content.set_camera_source.secondary_source = packet.param3;
+        break;
+
     case MAV_CMD_VIDEO_START_CAPTURE:
         cmd.content.video_start_capture.video_stream_id = packet.param1;
         break;
@@ -1509,8 +1512,6 @@ MAV_MISSION_RESULT AP_Mission::convert_MISSION_ITEM_INT_to_MISSION_ITEM(const ma
 
     return MAV_MISSION_ACCEPTED;
 }
-
-#if AP_MISSION_ENABLED
 
 // mission_cmd_to_mavlink_int - converts an AP_Mission::Mission_Command object to a mavlink message which can be sent to the GCS
 //  return true on success, false on failure
@@ -1870,6 +1871,12 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     case MAV_CMD_SET_CAMERA_FOCUS:
         packet.param1 = cmd.content.set_camera_focus.focus_type;
         packet.param2 = cmd.content.set_camera_focus.focus_value;
+        break;
+
+    case MAV_CMD_SET_CAMERA_SOURCE:
+        packet.param1 = cmd.content.set_camera_source.instance;
+        packet.param2 = cmd.content.set_camera_source.primary_source;
+        packet.param3 = cmd.content.set_camera_source.secondary_source;
         break;
 
     case MAV_CMD_VIDEO_START_CAPTURE:
@@ -2310,14 +2317,8 @@ void AP_Mission::check_eeprom_version()
 // find the nearest landing sequence starting point (DO_LAND_START) and
 // return its index.  Returns 0 if no appropriate DO_LAND_START point can
 // be found.
-uint16_t AP_Mission::get_landing_sequence_start()
+uint16_t AP_Mission::get_landing_sequence_start(const Location &current_loc)
 {
-    Location current_loc;
-
-    if (!AP::ahrs().get_location(current_loc)) {
-        return 0;
-    }
-
     const Location::AltFrame current_loc_alt_frame = current_loc.get_alt_frame();
     uint16_t landing_start_index = 0;
     float min_distance = -1;
@@ -2362,9 +2363,9 @@ uint16_t AP_Mission::get_landing_sequence_start()
    switch to that mission item.  Returns false if no DO_LAND_START
    available.
  */
-bool AP_Mission::jump_to_landing_sequence(void)
+bool AP_Mission::jump_to_landing_sequence(const Location &current_loc)
 {
-    uint16_t land_idx = get_landing_sequence_start();
+    uint16_t land_idx = get_landing_sequence_start(current_loc);
     if (land_idx != 0 && set_current_cmd(land_idx)) {
 
         //if the mission has ended it has to be restarted
@@ -2382,29 +2383,25 @@ bool AP_Mission::jump_to_landing_sequence(void)
 }
 
 // jumps the mission to the closest landing abort that is planned, returns false if unable to find a valid abort
-bool AP_Mission::jump_to_abort_landing_sequence(void)
+bool AP_Mission::jump_to_abort_landing_sequence(const Location &current_loc)
 {
-    Location current_loc;
-
     uint16_t abort_index = 0;
-    if (AP::ahrs().get_location(current_loc)) {
-        float min_distance = FLT_MAX;
+    float min_distance = FLT_MAX;
 
-        const auto count = num_commands();
-        for (uint16_t i = 1; i < count; i++) {
-            if (get_command_id(i) != uint16_t(MAV_CMD_DO_GO_AROUND)) {
-                continue;
-            }
-            Mission_Command tmp;
-            if (!read_cmd_from_storage(i, tmp)) {
-                continue;
-            }
-            if (tmp.id == MAV_CMD_DO_GO_AROUND) {
-                float tmp_distance = tmp.content.location.get_distance(current_loc);
-                if (tmp_distance < min_distance) {
-                    min_distance = tmp_distance;
-                    abort_index = i;
-                }
+    const auto count = num_commands();
+    for (uint16_t i = 1; i < count; i++) {
+        if (get_command_id(i) != uint16_t(MAV_CMD_DO_GO_AROUND)) {
+            continue;
+        }
+        Mission_Command tmp;
+        if (!read_cmd_from_storage(i, tmp)) {
+            continue;
+        }
+        if (tmp.id == MAV_CMD_DO_GO_AROUND) {
+            float tmp_distance = tmp.content.location.get_distance(current_loc);
+            if (tmp_distance < min_distance) {
+                min_distance = tmp_distance;
+                abort_index = i;
             }
         }
     }
@@ -2427,7 +2424,7 @@ bool AP_Mission::jump_to_abort_landing_sequence(void)
 }
 
 // check which is the shortest route to landing an RTL via a DO_LAND_START or continuing on the current mission plan
-bool AP_Mission::is_best_land_sequence(void)
+bool AP_Mission::is_best_land_sequence(const Location &current_loc)
 {
     // check if there is even a running mission to interupt
     if (_flags.state != MISSION_RUNNING) {
@@ -2450,16 +2447,9 @@ bool AP_Mission::is_best_land_sequence(void)
 
     // go through the mission for the nearest DO_LAND_START first as this is the most probable route
     // to a landing with the minimum number of WP.
-    uint16_t do_land_start_index = get_landing_sequence_start();
+    uint16_t do_land_start_index = get_landing_sequence_start(current_loc);
     if (do_land_start_index == 0) {
         // then no DO_LAND_START commands are in mission and normal failsafe behaviour should be maintained
-        return false;
-    }
-
-    // get our current location
-    Location current_loc;
-    if (!AP::ahrs().get_location(current_loc)) {
-        // we don't know where we are!!
         return false;
     }
 
@@ -2693,6 +2683,8 @@ const char *AP_Mission::Mission_Command::type() const
         return "SetCameraZoom";
     case MAV_CMD_SET_CAMERA_FOCUS:
         return "SetCameraFocus";
+    case MAV_CMD_SET_CAMERA_SOURCE:
+        return "SetCameraSource";
     case MAV_CMD_VIDEO_START_CAPTURE:
         return "VideoStartCapture";
     case MAV_CMD_VIDEO_STOP_CAPTURE:
@@ -2746,8 +2738,6 @@ bool AP_Mission::contains_item(MAV_CMD command) const
     return false;
 }
 
-#endif  // AP_MISSION_ENABLED
-
 /*
   return true if the mission item has a location
 */
@@ -2756,8 +2746,6 @@ bool AP_Mission::cmd_has_location(const uint16_t command)
 {
     return stored_in_location(command);
 }
-
-#if AP_MISSION_ENABLED
 
 /*
   return true if the mission has a terrain relative item.  ~2200us for 530 items on H7
@@ -2921,6 +2909,30 @@ void AP_Mission::format_conversion(uint8_t tag_byte, const Mission_Command &cmd,
     }
 #endif
 }
+
+// Helpers to fill in location for scripting
+#if AP_SCRIPTING_ENABLED
+bool AP_Mission::jump_to_landing_sequence(void)
+{
+    Location loc;
+    if (AP::ahrs().get_location(loc)) {
+        return jump_to_landing_sequence(loc);
+    }
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Unable to start landing sequence");
+    return false;
+}
+
+bool AP_Mission::jump_to_abort_landing_sequence(void)
+{
+    Location loc;
+    if (AP::ahrs().get_location(loc)) {
+        return jump_to_abort_landing_sequence(loc);
+    }
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Unable to start find a landing abort sequence");
+    return false;
+}
+#endif // AP_SCRIPTING_ENABLED
+
 
 // singleton instance
 AP_Mission *AP_Mission::_singleton;
